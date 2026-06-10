@@ -32,6 +32,7 @@ ESP32 主控制板
 | `main.cpp` | 加上較完整註解的程式版本，適合教師講解 |
 | `Oxygen_Saturation.fzz` | Fritzing 電路圖原始檔 |
 | `poster.png` | 課程海報或成果展示圖 |
+| `breadboard.png` | 麵包板示意圖 |
 | `esp32_實體.png` | ESP32 實體板照片 |
 | `esp32_pin_out.png` | ESP32 腳位圖 |
 | `MAX30102_pin_out.png` | MAX30102 腳位圖 |
@@ -315,6 +316,8 @@ tone(Tonepin, 1000, 10);
 ### 5. 麵包板
 
 麵包板是一種免焊接電路實驗板。它內部有金屬導通彈片，插入杜邦線或元件腳位後，可以讓特定孔位彼此相通，方便快速建立與修改電路。
+
+![麵包板示意圖](breadboard.png)
 
 常見麵包板分成兩種區域：
 
