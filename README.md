@@ -1,7 +1,7 @@
 # ESP32 血氧與心率偵測計教學
 
-## 國立新化高工資訊科 [https://www.hhvs.tn.edu.tw/it]
-## 資訊科FB [https://www.facebook.com/profile.php?id=61586012712591]
+### [國立新化高工資訊科](https://www.hhvs.tn.edu.tw/it)
+### [資訊科FB](https://www.facebook.com/profile.php?id=61586012712591)
 
 
 
