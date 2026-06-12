@@ -26,11 +26,15 @@ MAX30105 particleSensor;
 // 顯示與感測器初始化狀態
 bool oledReady = false;
 bool sensorReady = false;
+bool lastFingerOn = false;
 
 // 判斷手指是否放在感測器上的紅外強度門檻
-#define FINGER_ON 7000
+#define FINGER_ON_HIGH 9000
+#define FINGER_ON_LOW 7000
 // 最低可接受的血氧值，低於此視為異常
 #define MINIMUM_SPO2 90.0
+// BPM 至少累積幾筆再顯示，避免初始不穩
+#define MIN_VALID_BEATS 3
 
 // 儲存最近 BPM 的緩衝
 const byte RATE_SIZE = 8;
@@ -43,7 +47,7 @@ int beatAvg = 0;
 
 // SpO2 計算所需變數
 int sampleCount = 0;
-const int numSamples = 30;
+const int numSamples = 120; // 增加視窗降低抖動
 double avered = 0, aveir = 0;
 double sumirrms = 0, sumredrms = 0;
 double SpO2 = 0, ESpO2 = 90.0;
@@ -121,22 +125,32 @@ void drawMainScreen(bool fingerOn) {
   // 顯示血氧值
   display.setTextSize(3);
   display.setCursor(0, 20);
-  if (beatAvg > 30 && ESpO2 >= 90.0) {
-    display.print((int)(ESpO2 + 0.5));
+  bool spo2Low = false;
+  if (validRateCount >= MIN_VALID_BEATS) {
+    if (ESpO2 >= MINIMUM_SPO2) {
+      display.print((int)(ESpO2 + 0.5));
+    } else {
+      display.print("LOW");
+      spo2Low = true;
+    }
   } else {
     display.print("--");
   }
 
   display.setTextSize(2);
   display.setCursor(48, 28);
-  display.print("%");
+  if (!spo2Low) {
+    display.print("%");
+  } else {
+    display.print(" ");
+  }
 
   display.drawFastVLine(70, 12, 52, SSD1306_WHITE);
 
   // 顯示 BPM
   display.setTextSize(3);
   display.setCursor(78, 20);
-  if (beatAvg > 0) {
+  if (validRateCount >= MIN_VALID_BEATS) {
     if (beatAvg < 100) display.print(" ");
     display.print(beatAvg);
   } else {
@@ -146,7 +160,7 @@ void drawMainScreen(bool fingerOn) {
   // 顯示狀態提示
   display.setTextSize(1);
   display.setCursor(0, 56);
-  if (beatAvg > 30) {
+  if (validRateCount >= MIN_VALID_BEATS) {
     display.print("Keep still");
   } else {
     display.print("Measuring...");
@@ -204,26 +218,43 @@ void loop() {
 
   // 讀取紅外線強度，判斷是否手指放上傳感器
   long irValue = particleSensor.getIR();
-  bool fingerOn = (irValue > FINGER_ON);
+  // 使用滯回避免門檻附近抖動：ON 用高門檻，保持 ON 用低門檻
+  bool fingerOn = lastFingerOn ? (irValue > FINGER_ON_LOW) : (irValue > FINGER_ON_HIGH);
+
+  // 手指狀態切換時，重置資料並清空 FIFO，避免殘留舊資料干擾
+  if (fingerOn != lastFingerOn) {
+    resetReadings();
+    particleSensor.clearFIFO();
+    lastFingerOn = fingerOn;
+  }
 
   if (fingerOn) {
     // 若偵測到脈搏，計算心跳速率
     if (checkForBeat(irValue)) {
-      long delta = millis() - lastBeat;
-      lastBeat = millis();
+      unsigned long now = millis();
 
-      beatsPerMinute = 60.0 / (delta / 1000.0);
+      // 第一個脈搏只記錄時間，不做 BPM 計算
+      if (lastBeat == 0) {
+        lastBeat = now;
+      } else {
+        unsigned long delta = now - lastBeat;
+        lastBeat = now;
 
-      if (beatsPerMinute > 20 && beatsPerMinute < 255) {
-        rates[rateSpot++] = (byte)beatsPerMinute;
-        rateSpot %= RATE_SIZE;
-        if (validRateCount < RATE_SIZE) validRateCount++;
+        if (delta > 0) {
+          beatsPerMinute = 60.0 / (delta / 1000.0);
 
-        int total = 0;
-        for (byte i = 0; i < validRateCount; i++) total += rates[i];
-        beatAvg = total / validRateCount;
+          if (beatsPerMinute > 20 && beatsPerMinute < 255) {
+            rates[rateSpot++] = (byte)beatsPerMinute;
+            rateSpot %= RATE_SIZE;
+            if (validRateCount < RATE_SIZE) validRateCount++;
 
-        tone(Tonepin, 1000, 10);
+            int total = 0;
+            for (byte i = 0; i < validRateCount; i++) total += rates[i];
+            beatAvg = total / validRateCount;
+
+            tone(Tonepin, 1000, 10);
+          }
+        }
       }
     }
 
@@ -251,7 +282,7 @@ void loop() {
           SpO2 = -23.3 * (R - 0.4) + 100.0;
           ESpO2 = FSpO2 * ESpO2 + (1.0 - FSpO2) * SpO2;
 
-          if (ESpO2 <= MINIMUM_SPO2) ESpO2 = MINIMUM_SPO2;
+          if (ESpO2 < 0.0) ESpO2 = 0.0;
           if (ESpO2 > 100.0) ESpO2 = 99.9;
         }
 
@@ -264,8 +295,7 @@ void loop() {
       particleSensor.nextSample();
     }
   } else {
-    // 手指不在感測器上，重置讀值
-    resetReadings();
+    // 手指不在感測器上，狀態切換時已重置
   }
 
   // 定時更新畫面
