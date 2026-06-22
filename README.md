@@ -76,6 +76,7 @@ ESP32 主控制板
 | MAX30102 或 MAX30105 感測器 | 1 | 取得紅光與紅外線 PPG 訊號 |
 | 0.96 吋 128x64 I2C OLED | 1 | 顯示 SpO2、BPM 與狀態 |
 | 無源蜂鳴器 | 1 | 偵測到有效心跳時短鳴 |
+| WS2812 RGB LED | 1 | 依心跳區間顯示紫、黃、綠燈號 |
 | 麵包板 | 1 | 免焊接原型電路 |
 | 杜邦線 | 數條 | 連接模組與 ESP32 |
 | USB 傳輸線 | 1 | 供電與上傳程式 |
@@ -87,6 +88,7 @@ ESP32 主控制板
 - 藍色或綠色：SDA
 - 黃色或白色：SCL
 - 其他顏色：蜂鳴器訊號線
+- 紫色或橘色：WS2812 訊號線
 
 ## 五、元件功能與原理
 
@@ -113,7 +115,8 @@ ESP32 可以想成一台很小的電腦，內部包含：
 | GND | 接地 |
 | GPIO 21 / SDA | I2C 資料線 |
 | GPIO 22 / SCL | I2C 時脈線 |
-| GPIO 4 | 控制無源蜂鳴器，對應程式 `Tonepin = 4` |
+| GPIO 4 | 控制無源蜂鳴器，對應程式 `BUZZER_PIN = 4` |
+| GPIO 32 | 控制 WS2812 RGB LED，依 BPM 與 SpO2 顯示燈號或警報 |
 | BOOT | 上傳程式卡住時可按住進入燒錄模式 |
 
 注意事項：
@@ -158,6 +161,18 @@ MAX30102/MAX30105 會提供紅光與紅外線的原始資料，ESP32 程式再�
 心率 BPM 的概念是：心臟每跳一次，手指血管中的血液量會短暫改變，感測器讀到的反射光也會出現一次波動。程式找出兩次波動之間的時間差，就能換算每分鐘心跳次數。
 
 SpO2 的概念是：氧合血紅素與去氧血紅素對紅光、紅外線的吸收比例不同。程式比較 Red 與 IR 訊號變化比例，再用簡化公式估算血氧濃度。
+
+#### 一般血氧濃度警示值參考
+
+> 以下數值是常見健康教育參考，實際判斷仍應以合格醫療器材、臨床症狀與醫護人員評估為準。本專題量測結果僅供課堂觀察，不可作為醫療診斷依據。
+
+健康成人與兒童的正常血氧濃度（SpO2）通常應維持在 **95% 至 100%**。醫療上常見的血氧警示值如下：
+
+- **初步缺氧（93% 到 94%）：** 需保持靜止、監測觀察，若持續下降或有呼吸困難、胸悶等症狀，應提高警覺並就醫。
+- **危險缺氧（小於等於 92%）：** 視為缺氧警戒線。此時身體器官可能已無法獲得足夠氧氣，應立即聯繫所在地衛生局、就近前往急症室或撥打 119 尋求醫療協助。
+- **嚴重缺氧（小於 90%）：** 臨床上被視為低氧血症，極易損害大腦與心臟功能。
+
+> 本程式為了在課堂中明顯呈現警示效果，目前將血氧濃度低於 `99` 時設定為警報觸發條件。這不是實際醫療上的嚴重缺氧判定值；正式教學或展示前，請依正確警示值調整 `SPO2_ALARM_THRESHOLD` 後重新燒錄程式。
 
 #### PPG 國中生版重點說明
 
@@ -302,13 +317,22 @@ ESP32 輸出方波
 產生聲音
 ```
 
-程式中的短鳴控制：
+程式前段可調整蜂鳴器腳位與警報音參數：
+
+```cpp
+#define BUZZER_PIN 4
+#define ALARM_TONE_FREQUENCY 1800
+#define ALARM_TONE_ON_MS 180
+#define ALARM_TONE_OFF_MS 120
+```
+
+一般心跳短鳴控制：
 
 ```cpp
 tone(Tonepin, 1000, 10);
 ```
 
-意思是 ESP32 在 `Tonepin` 腳位輸出約 `1000 Hz` 的聲音，持續 `10 ms`。頻率越高，聲音越尖；頻率越低，聲音越低沉。
+意思是 ESP32 在 `BUZZER_PIN` 對應的腳位輸出約 `1000 Hz` 的聲音，持續 `10 ms`。頻率越高，聲音越尖；頻率越低，聲音越低沉。若觸發警報條件，程式會改用 `ALARM_TONE_FREQUENCY` 與 `ALARM_TONE_ON_MS` / `ALARM_TONE_OFF_MS` 產生間歇警報音。
 
 無源與有源蜂鳴器差異：
 
@@ -341,8 +365,10 @@ ESP32 GND → 麵包板藍色 - 電源軌
 
 OLED VCC     → 紅色 + 電源軌
 MAX30102 VCC → 紅色 + 電源軌
+WS2812 VCC   → 紅色 + 電源軌
 OLED GND     → 藍色 - 電源軌
 MAX30102 GND → 藍色 - 電源軌
+WS2812 GND   → 藍色 - 電源軌
 ```
 
 注意事項：
@@ -388,10 +414,22 @@ ESP32 GPIO22 SCL ── OLED SCL
 本專題程式中蜂鳴器腳位為：
 
 ```cpp
-const int Tonepin = 4;
+#define BUZZER_PIN 4
 ```
 
 因此蜂鳴器正極請接 `GPIO 4`。
+
+WS2812 RGB LED 訊號腳位為：
+
+```cpp
+#define WS2812_PIN 32
+#define BPM_PURPLE_THRESHOLD 80
+#define BPM_YELLOW_THRESHOLD 72
+#define SPO2_ALARM_THRESHOLD 99.0
+#define ALARM_BPM_THRESHOLD 80
+```
+
+因此 WS2812 的 DIN 請接 `GPIO 32`。一般燈號規則由 `BPM_PURPLE_THRESHOLD` 與 `BPM_YELLOW_THRESHOLD` 決定：BPM 達紫燈門檻時紫燈閃爍，達黃燈門檻時黃燈閃爍，低於黃燈門檻時綠燈常亮。若血氧低於 `SPO2_ALARM_THRESHOLD` 且 BPM 達 `ALARM_BPM_THRESHOLD`，警報優先啟動，WS2812 會紅紫交替閃爍，蜂鳴器會發出警報音。
 
 | 元件 | 元件腳位 | 接到 ESP32 | 說明 |
 |---|---|---|---|
@@ -405,6 +443,9 @@ const int Tonepin = 4;
 | MAX30102/MAX30105 | SCL | GPIO 22 / SCL | 與 OLED 共用 |
 | 無源蜂鳴器 | + | GPIO 4 | 心跳提示音 |
 | 無源蜂鳴器 | - | GND | 接地 |
+| WS2812 RGB LED | VCC | 3V3 | LED 電源 |
+| WS2812 RGB LED | GND | GND | 接地 |
+| WS2812 RGB LED | DIN | GPIO 32 | BPM 狀態燈訊號 |
 
 > 有些 ESP32 板子會直接印 `SDA`、`SCL`，有些則只印 `21`、`22`。若板子不同，請以板上腳位圖為準。
 
@@ -447,6 +488,7 @@ NodeMCU-32S
 | `Adafruit SSD1306` | Adafruit | 控制 OLED |
 | `Adafruit GFX Library` | Adafruit | 顯示文字與圖形 |
 | `Adafruit BusIO` | Adafruit | Adafruit 函式庫依賴 |
+| `Adafruit NeoPixel` | Adafruit | 控制 WS2812 RGB LED |
 | `SparkFun MAX3010x Pulse and Proximity Sensor Library` | SparkFun | 讀取 MAX30102/MAX30105 |
 
 程式中會使用：
@@ -455,6 +497,7 @@ NodeMCU-32S
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Adafruit_NeoPixel.h>
 #include "MAX30105.h"
 #include "heartRate.h"
 ```
@@ -492,6 +535,7 @@ NodeMCU-32S
    - `Measuring...`：正在量測
    - `Keep still`：請保持穩定
 4. 每偵測到一次有效心跳，蜂鳴器會短鳴一次。
+5. 若 `SpO2` 低於 `SPO2_ALARM_THRESHOLD` 且 `BPM` 達 `ALARM_BPM_THRESHOLD`，WS2812 會紅紫交替閃爍，蜂鳴器會改為警報音。
 
 觀察問題：
 
@@ -519,20 +563,40 @@ ESP32 初始化 I2C
     ↓
 OLED 顯示數值與狀態
     ↓
-偵測到有效心跳時，蜂鳴器短鳴
+依 BPM 與 SpO2 更新 WS2812 燈號
+        ↓
+偵測到有效心跳時蜂鳴器短鳴，達警報條件時改為警報音
 ```
 
 ## 十一、程式重點
 
-### 1. 判斷手指是否放上感測器
+### 1. 可調整參數集中區
+
+程式前段有一個 `可調整參數` 區塊，常用門檻與時間都集中在這裡，後續要調整燈號、警報或量測穩定度時，不需要到主迴圈裡找條件式。
 
 ```cpp
-#define FINGER_ON 7000
+#define BUZZER_PIN 4
+#define WS2812_PIN 32
+#define BPM_PURPLE_THRESHOLD 80
+#define BPM_YELLOW_THRESHOLD 72
+#define SPO2_ALARM_THRESHOLD 99.0
+#define ALARM_BPM_THRESHOLD 80
+#define FINGER_ON_HIGH 9000
+#define FINGER_ON_LOW 7000
 ```
 
-程式會讀取紅外線 `IR` 值。當 IR 值高於門檻時，視為手指已放上感測器。
+這些數值分別控制蜂鳴器腳位、WS2812 腳位、BPM 燈號門檻、SpO2 警報門檻與手指偵測靈敏度。
 
-### 2. 偵測心跳
+### 2. 判斷手指是否放上感測器
+
+```cpp
+#define FINGER_ON_HIGH 9000
+#define FINGER_ON_LOW 7000
+```
+
+程式會讀取紅外線 `IR` 值。當 IR 值高於 `FINGER_ON_HIGH` 時，視為手指已放上感測器；已偵測到手指後，使用較低的 `FINGER_ON_LOW` 維持狀態，避免門檻附近反覆跳動。
+
+### 3. 偵測心跳
 
 ```cpp
 if (checkForBeat(irValue)) {
@@ -542,7 +606,7 @@ if (checkForBeat(irValue)) {
 
 `checkForBeat()` 會從 IR 訊號中尋找心跳波形。每找到一次有效心跳，就計算兩次心跳之間的時間差，再換算成 BPM。
 
-### 3. 平滑 BPM
+### 4. 平滑 BPM
 
 ```cpp
 const byte RATE_SIZE = 8;
@@ -550,7 +614,7 @@ const byte RATE_SIZE = 8;
 
 程式會取最近 8 次有效 BPM 做平均，避免畫面數字跳動太劇烈。
 
-### 4. 估算 SpO2
+### 5. 估算 SpO2
 
 ```cpp
 double R = (sqrt(sumredrms) / avered) / (sqrt(sumirrms) / aveir);
@@ -559,7 +623,7 @@ SpO2 = -23.3 * (R - 0.4) + 100.0;
 
 血氧估算會比較紅光與紅外線訊號的變化比例。這是教學用的簡化估算，不是醫療級校正公式。
 
-### 5. OLED 顯示
+### 6. OLED 顯示
 
 ```cpp
 drawMainScreen(fingerOn);
@@ -567,13 +631,25 @@ drawMainScreen(fingerOn);
 
 畫面會依照是否有手指，切換成提示畫面或數值畫面。
 
-### 6. 蜂鳴器提示
+### 7. WS2812 燈號與警報
+
+```cpp
+if (beatAvg >= BPM_PURPLE_THRESHOLD) {
+        ...
+} else if (beatAvg >= BPM_YELLOW_THRESHOLD) {
+        ...
+}
+```
+
+一般狀態下，WS2812 會依 BPM 平均值顯示紫、黃、綠三種狀態。警報條件由 `SPO2_ALARM_THRESHOLD` 與 `ALARM_BPM_THRESHOLD` 控制，當 `SpO2` 低於門檻且 BPM 達門檻時，紅紫交替閃爍會優先於一般 BPM 燈號。目前 `SPO2_ALARM_THRESHOLD` 設為 `99.0` 是為了呈現警示效果，實際教學使用需依正確值調整後重新燒錄程式。
+
+### 8. 蜂鳴器提示
 
 ```cpp
 tone(Tonepin, 1000, 10);
 ```
 
-每次偵測到有效心跳時，蜂鳴器會發出短促提示音。
+每次偵測到有效心跳時，蜂鳴器會發出短促提示音。若血氧低於 `SPO2_ALARM_THRESHOLD` 且 BPM 達 `ALARM_BPM_THRESHOLD`，程式會暫停一般心跳短鳴，改用連續間歇式警報音。
 
 ## 十二、課堂建議流程
 
@@ -615,7 +691,7 @@ tone(Tonepin, 1000, 10);
 1. 修改蜂鳴器音調或持續時間。
 2. 改變 OLED 顯示版面。
 3. 顯示 IR 或 Red 原始數值。
-4. 調整 `FINGER_ON` 門檻，觀察手指偵測靈敏度。
+4. 調整 `FINGER_ON_HIGH` 與 `FINGER_ON_LOW` 門檻，觀察手指偵測靈敏度。
 5. 加入 SpO2 或 BPM 警示條件。
 6. 使用 Wi-Fi 將資料上傳到網頁或雲端。
 7. 設計外殼或固定架，讓手指更穩定。

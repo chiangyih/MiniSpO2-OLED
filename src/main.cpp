@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Adafruit_NeoPixel.h>
 #include "MAX30105.h"
 #include "heartRate.h"
 
@@ -8,17 +9,62 @@
 #define IRAM_ATTR
 #endif
 
-// OLED 顯示器尺寸與 I2C 位址設定
+// ==================== 可調整參數 ====================
+// OLED 顯示器尺寸與 I2C 位址設定；若 OLED 位址不同，可將 OLED_ADDR 改為 0x3D。
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define OLED_ADDR 0x3C
 
+// 蜂鳴器腳位與警報音設定；ALARM_TONE_* 可調整警報音高與鳴叫節奏。
+#define BUZZER_PIN 4
+#define ALARM_TONE_FREQUENCY 1800
+#define ALARM_TONE_ON_MS 180
+#define ALARM_TONE_OFF_MS 120
+
+// WS2812 狀態燈設定；亮度建議不要太高，避免增加 ESP32 供電負擔。
+#define WS2812_PIN 32
+#define WS2812_COUNT 1
+#define WS2812_BRIGHTNESS 40
+#define WS2812_BLINK_INTERVAL 300
+#define WS2812_ALARM_BLINK_INTERVAL 180
+
+// 手指偵測門檻；HIGH 是由未放手指切換為有手指，LOW 是保持有手指的滯回門檻。
+#define FINGER_ON_HIGH 9000
+#define FINGER_ON_LOW 7000
+
+// 心跳計算設定；初始暖機與合理 BPM 範圍可降低剛開機或晃動造成的誤判。
+#define MIN_VALID_BEATS 3
+#define HEART_RATE_WARMUP_MS 2000
+#define MIN_ACCEPT_BPM 40
+#define MAX_ACCEPT_BPM 180
+
+// WS2812 一般 BPM 燈號門檻；高於紫燈門檻閃紫燈，高於黃燈門檻閃黃燈，其餘常亮綠燈。
+#define BPM_PURPLE_THRESHOLD 80
+#define BPM_YELLOW_THRESHOLD 72
+
+// 血氧顯示與警報門檻；SpO2 低於 99 且 BPM 達警報門檻時啟動紅紫燈與警報音。
+#define MINIMUM_SPO2 90.0 // 
+#define SPO2_ALARM_THRESHOLD 99.0
+#define ALARM_BPM_THRESHOLD 80
+
+// SpO2 取樣與平滑設定；樣本數越大越穩定，但反應會較慢。
+#define SPO2_SAMPLE_COUNT 120
+#define SPO2_SMOOTHING 0.7
+#define SIGNAL_SMOOTHING 0.95
+
+// OLED 畫面更新間隔，單位為毫秒。
+#define DISPLAY_INTERVAL 250
+
+// ==================== 物件與狀態變數 ====================
+
 // 建立 SSD1306 顯示器物件，使用 I2C 與設定的重置腳位
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // 蜂鳴器腳位，用於偵測到脈搏時發聲提示
-const int Tonepin = 4;
+const int Tonepin = BUZZER_PIN;
+
+Adafruit_NeoPixel statusPixel(WS2812_COUNT, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
 // MAX30105 感測器物件
 MAX30105 particleSensor;
@@ -28,35 +74,88 @@ bool oledReady = false;
 bool sensorReady = false;
 bool lastFingerOn = false;
 
-// 判斷手指是否放在感測器上的紅外強度門檻
-#define FINGER_ON_HIGH 9000
-#define FINGER_ON_LOW 7000
-// 最低可接受的血氧值，低於此視為異常
-#define MINIMUM_SPO2 90.0
-// BPM 至少累積幾筆再顯示，避免初始不穩
-#define MIN_VALID_BEATS 3
-
 // 儲存最近 BPM 的緩衝
 const byte RATE_SIZE = 8;
 byte rates[RATE_SIZE];
 byte rateSpot = 0;
 byte validRateCount = 0;
 long lastBeat = 0;
+unsigned long fingerOnSince = 0;
 float beatsPerMinute = 0;
 int beatAvg = 0;
 
 // SpO2 計算所需變數
 int sampleCount = 0;
-const int numSamples = 120; // 增加視窗降低抖動
+const int numSamples = SPO2_SAMPLE_COUNT;
 double avered = 0, aveir = 0;
 double sumirrms = 0, sumredrms = 0;
 double SpO2 = 0, ESpO2 = 90.0;
-const double FSpO2 = 0.7; // 平滑係數
-const double frate = 0.95; // 平滑濾波係數
+bool spo2Ready = false;
+const double FSpO2 = SPO2_SMOOTHING;
+const double frate = SIGNAL_SMOOTHING;
 
 // 顯示更新控制
 unsigned long lastDisplayUpdate = 0;
-const unsigned long DISPLAY_INTERVAL = 250; // 每 250ms 更新 OLED
+uint32_t currentStatusColor = 0xFFFFFFFF;
+unsigned long lastAlarmToneChange = 0;
+bool alarmToneOn = false;
+
+void showStatusPixel(uint32_t color) {
+  if (color == currentStatusColor) return;
+  statusPixel.setPixelColor(0, color);
+  statusPixel.show();
+  currentStatusColor = color;
+}
+
+void updateStatusPixel(bool fingerOn) {
+  if (!fingerOn || validRateCount < MIN_VALID_BEATS) {
+    showStatusPixel(0);
+    return;
+  }
+
+  bool alarmActive = spo2Ready && ESpO2 < SPO2_ALARM_THRESHOLD && beatAvg >= ALARM_BPM_THRESHOLD;
+  if (alarmActive) {
+    bool redOn = (millis() / WS2812_ALARM_BLINK_INTERVAL) % 2 == 0;
+    showStatusPixel(redOn ? statusPixel.Color(180, 0, 0) : statusPixel.Color(128, 0, 128));
+  } else if (beatAvg >= BPM_PURPLE_THRESHOLD) {
+    bool ledOn = (millis() / WS2812_BLINK_INTERVAL) % 2 == 0;
+    showStatusPixel(ledOn ? statusPixel.Color(128, 0, 128) : 0);
+  } else if (beatAvg >= BPM_YELLOW_THRESHOLD) {
+    bool ledOn = (millis() / WS2812_BLINK_INTERVAL) % 2 == 0;
+    showStatusPixel(ledOn ? statusPixel.Color(180, 120, 0) : 0);
+  } else {
+    showStatusPixel(statusPixel.Color(0, 120, 0));
+  }
+}
+
+bool isAlarmActive(bool fingerOn) {
+  return fingerOn && spo2Ready && validRateCount >= MIN_VALID_BEATS &&
+         ESpO2 < SPO2_ALARM_THRESHOLD && beatAvg >= ALARM_BPM_THRESHOLD;
+}
+
+void updateAlarmBuzzer(bool alarmActive) {
+  unsigned long now = millis();
+
+  if (!alarmActive) {
+    if (alarmToneOn) {
+      noTone(Tonepin);
+      alarmToneOn = false;
+    }
+    lastAlarmToneChange = now;
+    return;
+  }
+
+  unsigned long interval = alarmToneOn ? ALARM_TONE_ON_MS : ALARM_TONE_OFF_MS;
+  if (now - lastAlarmToneChange >= interval) {
+    alarmToneOn = !alarmToneOn;
+    lastAlarmToneChange = now;
+    if (alarmToneOn) {
+      tone(Tonepin, ALARM_TONE_FREQUENCY);
+    } else {
+      noTone(Tonepin);
+    }
+  }
+}
 
 // 重置所有量測資料與計算狀態
 void resetReadings() {
@@ -64,6 +163,7 @@ void resetReadings() {
   rateSpot = 0;
   validRateCount = 0;
   lastBeat = 0;
+  fingerOnSince = 0;
   beatsPerMinute = 0;
   beatAvg = 0;
 
@@ -74,6 +174,9 @@ void resetReadings() {
   sumredrms = 0;
   SpO2 = 0;
   ESpO2 = 90.0;
+  spo2Ready = false;
+  noTone(Tonepin);
+  alarmToneOn = false;
 }
 
 // 文字置中輸出到 OLED
@@ -179,6 +282,10 @@ void drawMainScreen(bool fingerOn) {
 void setup() {
   Serial.begin(115200);
 
+  statusPixel.begin();
+  statusPixel.setBrightness(WS2812_BRIGHTNESS);
+  showStatusPixel(0);
+
   // 初始化 OLED 顯示器
   oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oledReady) {
@@ -225,6 +332,7 @@ void loop() {
   if (fingerOn != lastFingerOn) {
     resetReadings();
     particleSensor.clearFIFO();
+    if (fingerOn) fingerOnSince = millis();
     lastFingerOn = fingerOn;
   }
 
@@ -232,18 +340,23 @@ void loop() {
     // 若偵測到脈搏，計算心跳速率
     if (checkForBeat(irValue)) {
       unsigned long now = millis();
+      bool warmedUp = fingerOnSince > 0 && (now - fingerOnSince >= HEART_RATE_WARMUP_MS);
+
+      if (!warmedUp) {
+        lastBeat = 0;
+      }
 
       // 第一個脈搏只記錄時間，不做 BPM 計算
-      if (lastBeat == 0) {
+      else if (lastBeat == 0) {
         lastBeat = now;
       } else {
         unsigned long delta = now - lastBeat;
-        lastBeat = now;
 
         if (delta > 0) {
           beatsPerMinute = 60.0 / (delta / 1000.0);
 
-          if (beatsPerMinute > 20 && beatsPerMinute < 255) {
+          if (beatsPerMinute >= MIN_ACCEPT_BPM && beatsPerMinute <= MAX_ACCEPT_BPM) {
+            lastBeat = now;
             rates[rateSpot++] = (byte)beatsPerMinute;
             rateSpot %= RATE_SIZE;
             if (validRateCount < RATE_SIZE) validRateCount++;
@@ -252,7 +365,9 @@ void loop() {
             for (byte i = 0; i < validRateCount; i++) total += rates[i];
             beatAvg = total / validRateCount;
 
-            tone(Tonepin, 1000, 10);
+            if (!isAlarmActive(fingerOn)) tone(Tonepin, 1000, 10);
+          } else if (beatsPerMinute < MIN_ACCEPT_BPM) {
+            lastBeat = now;
           }
         }
       }
@@ -284,6 +399,7 @@ void loop() {
 
           if (ESpO2 < 0.0) ESpO2 = 0.0;
           if (ESpO2 > 100.0) ESpO2 = 99.9;
+          spo2Ready = true;
         }
 
         // 重置樣本統計
@@ -297,6 +413,9 @@ void loop() {
   } else {
     // 手指不在感測器上，狀態切換時已重置
   }
+
+  updateStatusPixel(fingerOn);
+  updateAlarmBuzzer(isAlarmActive(fingerOn));
 
   // 定時更新畫面
   if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL) {
