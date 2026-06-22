@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Wi-Fi 密碼檔（避免帳密上傳到 GitHub）
+include/wifi_secrets.h
+Arduino_IDE_code/wifi_secrets.h

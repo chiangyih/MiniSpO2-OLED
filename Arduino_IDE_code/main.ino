@@ -2,8 +2,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
 #include "MAX30105.h"
 #include "heartRate.h"
+#include "wifi_secrets.h"
 
 #ifndef IRAM_ATTR
 #define IRAM_ATTR
@@ -56,6 +58,11 @@
 // OLED 畫面更新間隔，單位為毫秒。
 #define DISPLAY_INTERVAL 250
 
+// Wi-Fi 設定：SSID/密碼放在 wifi_secrets.h，避免主程式出現明碼。
+#define WIFI_CONNECT_TIMEOUT_MS 8000
+#define WIFI_PRIMARY_TIMEOUT_MS 6000
+#define WIFI_RETRY_INTERVAL_MS 10000
+
 // ==================== 物件與狀態變數 ====================
 
 // 建立 SSD1306 顯示器物件，使用 I2C 與設定的重置腳位
@@ -99,6 +106,94 @@ unsigned long lastDisplayUpdate = 0;
 uint32_t currentStatusColor = 0xFFFFFFFF;
 unsigned long lastAlarmToneChange = 0;
 bool alarmToneOn = false;
+bool wifiConnected = false;
+int currentWiFiIndex = -1;
+unsigned long wifiAttemptStart = 0;
+unsigned long lastWiFiRetry = 0;
+bool wifiAttemptInProgress = false;
+
+unsigned long getWiFiTimeoutMs(int apIndex) {
+  return (apIndex == 0) ? WIFI_PRIMARY_TIMEOUT_MS : WIFI_CONNECT_TIMEOUT_MS;
+}
+
+void startWiFiAttempt(int apIndex) {
+  if (apIndex < 0 || apIndex >= WIFI_AP_COUNT) return;
+
+  currentWiFiIndex = apIndex;
+  wifiAttemptStart = millis();
+  wifiAttemptInProgress = true;
+
+  Serial.print("Connecting WiFi: ");
+  Serial.println(WIFI_SSIDS[apIndex]);
+  WiFi.begin(WIFI_SSIDS[apIndex], WIFI_PASSWORDS[apIndex]);
+}
+
+void beginWiFiConnectionManager() {
+  WiFi.mode(WIFI_STA);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    Serial.print("WiFi already connected, IP: ");
+    Serial.println(WiFi.localIP());
+    return;
+  }
+
+  wifiConnected = false;
+  startWiFiAttempt(0);
+}
+
+void handleWiFiConnection() {
+  wl_status_t status = WiFi.status();
+  unsigned long now = millis();
+
+  if (status == WL_CONNECTED) {
+    if (!wifiConnected) {
+      Serial.print("WiFi connected: ");
+      if (currentWiFiIndex >= 0 && currentWiFiIndex < WIFI_AP_COUNT) {
+        Serial.println(WIFI_SSIDS[currentWiFiIndex]);
+      } else {
+        Serial.println("(unknown)");
+      }
+      Serial.print("IP: ");
+      Serial.println(WiFi.localIP());
+    }
+
+    wifiConnected = true;
+    wifiAttemptInProgress = false;
+    return;
+  }
+
+  wifiConnected = false;
+
+  if (wifiAttemptInProgress) {
+    if (now - wifiAttemptStart >= getWiFiTimeoutMs(currentWiFiIndex)) {
+      int nextIndex = currentWiFiIndex + 1;
+      WiFi.disconnect();
+
+      if (nextIndex < WIFI_AP_COUNT) {
+        startWiFiAttempt(nextIndex);
+      } else {
+        wifiAttemptInProgress = false;
+        lastWiFiRetry = now;
+        Serial.println("WiFi connect failed on all configured SSIDs.");
+      }
+    }
+    return;
+  }
+
+  if (now - lastWiFiRetry >= WIFI_RETRY_INTERVAL_MS) {
+    startWiFiAttempt(0);
+  }
+}
+
+void drawWiFiIcon(int x, int y) {
+  display.drawCircle(x + 5, y + 6, 5, SSD1306_WHITE);
+  display.drawCircle(x + 5, y + 6, 3, SSD1306_WHITE);
+  display.drawCircle(x + 5, y + 6, 1, SSD1306_WHITE);
+  // 遮掉下半部，只保留上方弧線，再補上底部圓點。
+  display.fillRect(x, y + 6, 11, 6, SSD1306_BLACK);
+  display.fillCircle(x + 5, y + 7, 1, SSD1306_WHITE);
+}
 
 void showStatusPixel(uint32_t color) {
   if (color == currentStatusColor) return;
@@ -213,6 +308,7 @@ void drawMainScreen(bool fingerOn) {
     display.drawFastHLine(0, 13, 128, SSD1306_WHITE);
     printCentered("PLACE FINGER", 26, 1);
     printCentered("ON SENSOR", 42, 1);
+    if (wifiConnected) drawWiFiIcon(116, 0);
     display.display();
     return;
   }
@@ -276,6 +372,8 @@ void drawMainScreen(bool fingerOn) {
     display.drawCircle(122, 58, 3, SSD1306_WHITE);
   }
 
+  if (wifiConnected) drawWiFiIcon(116, 0);
+
   display.display();
 }
 
@@ -295,6 +393,8 @@ void setup() {
   } else {
     Serial.println("OLED not found. Check I2C address/wiring.");
   }
+
+  beginWiFiConnectionManager();
 
   // 初始化 MAX30105 感測器，使用 I2C 快速模式
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
@@ -318,6 +418,8 @@ void setup() {
 
 // 主迴圈
 void loop() {
+  handleWiFiConnection();
+
   if (!sensorReady) {
     delay(1000);
     return;
