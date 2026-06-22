@@ -18,7 +18,7 @@ ESP32 主控制板
 
 > 注意：本作品是教學與實驗用裝置，不是醫療器材。SpO2 與 BPM 數值僅供觀察感測器與程式運作，不可作為醫療診斷或健康判斷依據。
 
-![課程海報](poster.png)
+![課程海報](img/poster.png)
 
 ## 一、課程目標
 
@@ -35,15 +35,15 @@ ESP32 主控制板
 
 | 檔案 | 用途 |
 |---|---|
-| `main.ino` | Arduino IDE 可直接開啟與上傳的程式 |
-| `main.cpp` | 加上較完整註解的程式版本，適合教師講解 |
-| `Oxygen_Saturation.fzz` | Fritzing 電路圖原始檔 |
-| `poster.png` | 課程海報或成果展示圖 |
-| `breadboard.png` | 麵包板示意圖 |
-| `esp32_實體.png` | ESP32 實體板照片 |
-| `esp32_pin_out.png` | ESP32 腳位圖 |
-| `MAX30102_pin_out.png` | MAX30102 腳位圖 |
-| `oled_pin_out.png` | OLED 腳位圖 |
+| `Arduino_IDE_code/main.ino` | Arduino IDE 可直接開啟與上傳的程式 |
+| `src/main.cpp` | 加上較完整註解的程式版本，適合教師講解 |
+| `Fritzing/Oxygen_Saturation.fzz` | Fritzing 電路圖原始檔 |
+| `img/poster.png` | 課程海報或成果展示圖 |
+| `img/breadboard.png` | 麵包板示意圖 |
+| `img/esp32_實體.png` | ESP32 實體板照片 |
+| `img/esp32_pin_out.png` | ESP32 腳位圖 |
+| `img/MAX30102_pin_out.png` | MAX30102 腳位圖 |
+| `img/oled_pin_out.png` | OLED 腳位圖 |
 | `ESP32_血氧濃度偵測計_詳細教學.md` | 完整講義版本 |
 | `ESP32_MAX30102_OLED_Buzzer_Breadboard_功能與原理說明.md` | 元件功能與原理說明 |
 | `MAX30102_PPG原理_國中生版說明.md` | PPG 原理的國中生版說明 |
@@ -123,7 +123,7 @@ ESP32 可以想成一台很小的電腦，內部包含：
 - GPIO 0、2、12、15 與開機模式相關，初學時應避免隨意使用。
 - 若上傳程式失敗，可在 `Connecting...` 時按住 `BOOT` 鍵。
 
-![ESP32 實體板](esp32_實體.png)
+![ESP32 實體板](img/esp32_實體.png)
 
 ### 2. MAX30102 / MAX30105 血氧與心率感測器
 
@@ -244,7 +244,7 @@ BPM 是 Beats Per Minute 的縮寫，意思是每分鐘心跳次數。
 - 強光直射會干擾感測。
 - 手指太冷或血液循環較差時，訊號可能較弱。
 
-![MAX30102 腳位圖](MAX30102_pin_out.png)
+![MAX30102 腳位圖](img/MAX30102_pin_out.png)
 
 ### 3. 0.96 吋 OLED 顯示模組
 
@@ -284,7 +284,7 @@ OLED 顯示 SpO2、BPM 與提示文字
 
 若 OLED 沒有畫面，請先檢查 VCC、GND、SDA、SCL，再確認程式中的 OLED 位址。
 
-![OLED 腳位圖](oled_pin_out.png)
+![OLED 腳位圖](img/oled_pin_out.png)
 
 ### 4. 無源蜂鳴器
 
@@ -324,7 +324,7 @@ tone(Tonepin, 1000, 10);
 
 麵包板是一種免焊接電路實驗板。它內部有金屬導通彈片，插入杜邦線或元件腳位後，可以讓特定孔位彼此相通，方便快速建立與修改電路。
 
-![麵包板示意圖](breadboard.png)
+![麵包板示意圖](img/breadboard.png)
 
 常見麵包板分成兩種區域：
 
@@ -464,7 +464,7 @@ NodeMCU-32S
 ### 1. 上傳程式
 
 1. 將 ESP32 用 USB 線接上電腦。
-2. 用 Arduino IDE 開啟 `main.ino`。
+2. 用 Arduino IDE 開啟 `Arduino_IDE_code/main.ino`。
 3. 選擇開發板，例如 `NodeMCU-32S`。
 4. 選擇正確的 `COM Port`。
 5. 確認 OLED 位址為 `0x3C`：
