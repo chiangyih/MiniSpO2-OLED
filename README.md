@@ -7,13 +7,15 @@
 
 
 
-本專題使用 ESP32、MAX30102/MAX30105 血氧心率感測器、0.96 吋 OLED、無源蜂鳴器與麵包板，製作一套簡易的血氧與心率偵測系統。學生可透過本專題學習微控制器、I2C 通訊、光學感測、OLED 顯示與聲音提示。
+本專題使用 ESP32、MAX30102/MAX30105 血氧心率感測器、0.96 吋 OLED、無源蜂鳴器、WS2812 RGB LED 與麵包板，製作一套簡易的血氧與心率偵測系統。並透過 ESP32 內建的 Wi-Fi 功能，實現雙 SSID 自動連接與無線資料傳輸。學生可透過本專題學習微控制器、I2C 通訊、光學感測、OLED 顯示、聲音提示與 Wi-Fi 無線連接。
 
 ```text
 ESP32 主控制板
   ├─ I2C → MAX30102/MAX30105 感測器
   ├─ I2C → 0.96 吋 OLED 顯示器
-  └─ GPIO / 方波 → 無源蜂鳴器提示音
+  ├─ GPIO → WS2812 RGB LED 狀態指示
+  ├─ GPIO / 方波 → 無源蜂鳴器提示音
+  └─ Wi-Fi → 網路連接與遠端資料傳輸
 ```
 
 > 注意：本作品是教學與實驗用裝置，不是醫療器材。SpO2 與 BPM 數值僅供觀察感測器與程式運作，不可作為醫療診斷或健康判斷依據。
@@ -72,14 +74,15 @@ ESP32 主控制板
 
 | 材料 | 數量 | 說明 |
 |---|---:|---|
-| ESP32 / NodeMCU-32S 開發板 | 1 | 系統主控制器 |
+| ESP32 / NodeMCU-32S 開發板 | 1 | 系統主控制器，內建 Wi-Fi 與 Bluetooth |
 | MAX30102 或 MAX30105 感測器 | 1 | 取得紅光與紅外線 PPG 訊號 |
-| 0.96 吋 128x64 I2C OLED | 1 | 顯示 SpO2、BPM 與狀態 |
-| 無源蜂鳴器 | 1 | 偵測到有效心跳時短鳴 |
-| WS2812 RGB LED | 1 | 依心跳區間顯示紫、黃、綠燈號 |
+| 0.96 吋 128x64 I2C OLED | 1 | 顯示 SpO2、BPM、Wi-Fi 狀態與提示 |
+| 無源蜂鳴器 | 1 | 偵測到有效心跳時短鳴或報警 |
+| WS2812 RGB LED | 1 | 依心跳區間與血氧狀態顯示燈號 |
 | 麵包板 | 1 | 免焊接原型電路 |
 | 杜邦線 | 數條 | 連接模組與 ESP32 |
 | USB 傳輸線 | 1 | 供電與上傳程式 |
+| Wi-Fi 網路環境（可選） | - | 支援 2.4GHz 的 802.11 b/g/n 無線網路 |
 
 建議線色：
 
@@ -301,6 +304,91 @@ OLED 顯示 SpO2、BPM 與提示文字
 
 ![OLED 腳位圖](img/oled_pin_out.png)
 
+### 6. Wi-Fi 無線連接
+
+ESP32 內建 Wi-Fi 模組，支援 IEEE 802.11 b/g/n 標準（2.4GHz 頻段）。本專題利用 Wi-Fi 功能實現：
+
+- **雙 SSID 自動連接**：配置兩組網路 (AP1 與 AP2)，若主要 SSID 連接失敗，自動切換至備用 SSID
+- **非阻塞式連接**：Wi-Fi 連接在背景進行，不會卡住主程式，感測器仍能正常量測
+- **自動重連機制**：若 Wi-Fi 斷線，每 10 秒自動嘗試重新連接
+- **延後啟動機制**：開機先初始化 OLED 與感測器，5 秒後才啟動 Wi-Fi，降低瞬間電流衝擊
+- **低功耗連線**：啟用 Wi-Fi Sleep 與較低發射功率，減少 brownout（低電壓重置）風險
+- **狀態指示**：OLED 右上角顯示 Wi-Fi 圖示，連接成功時常亮
+
+#### Wi-Fi 連接參數設定
+
+Wi-Fi 密碼與 SSID 儲存在 `wifi_secrets.h` 檔案中，避免在 GitHub 上洩露帳號密碼：
+
+```cpp
+static const char* const WIFI_SSIDS[] = {"YOUR_WIFI_1", "YOUR_WIFI_2"};
+static const char* const WIFI_PASSWORDS[] = {"YOUR_PASS_1", "YOUR_PASS_2"};
+```
+
+連接超時設定（可在 main.cpp 中調整）：
+
+| 參數 | 值 | 說明 |
+|---|---|---|
+| `WIFI_PRIMARY_TIMEOUT_MS` | 6000 | 第 1 組 SSID 的連接超時時間（6 秒） |
+| `WIFI_CONNECT_TIMEOUT_MS` | 8000 | 第 2 組 SSID 的連接超時時間（8 秒） |
+| `WIFI_RETRY_INTERVAL_MS` | 10000 | 所有 SSID 連接失敗後重試間隔（10 秒） |
+| `WIFI_START_DELAY_MS` | 5000 | 開機後延後啟動 Wi-Fi 的時間（5 秒） |
+
+#### Wi-Fi 連接流程
+
+```text
+系統啟動
+    ↓
+ESP32 先初始化 OLED 與 MAX3010x
+    ↓
+Wi-Fi 暫時關閉（WIFI_OFF）
+    ↓
+等待 5 秒（WIFI_START_DELAY_MS）
+    ↓
+ESP32 啟動 Wi-Fi 模組
+    ↓
+嘗試連接第 1 組 SSID (6 秒超時)
+    ↓
+成功? ─ 是 ─ → 顯示 Wi-Fi 圖示，進行主程式迴圈
+    ↓
+    否
+    ↓
+嘗試連接第 2 組 SSID (8 秒超時)
+    ↓
+成功? ─ 是 ─ → 顯示 Wi-Fi 圖示，進行主程式迴圈
+    ↓
+    否
+    ↓
+等待 10 秒後從第 1 組 SSID 重新開始
+```
+
+#### Wi-Fi 密碼與安全性
+
+為了避免密碼洩露到 GitHub，本專題採用以下做法：
+
+1. **實際密碼檔** (`wifi_secrets.h`)：包含真實 SSID 與密碼，已加入 `.gitignore` 不上傳
+2. **範本檔** (`wifi_secrets.example.h`)：提供給使用者複製與填入自己密碼的模板
+3. **主程式隱密** (`main.cpp`)：只 include `wifi_secrets.h`，不涉及密碼明碼
+
+使用方式：
+
+```bash
+# 1. 複製範本檔
+cp wifi_secrets.example.h wifi_secrets.h
+
+# 2. 編輯 wifi_secrets.h，填入實際的 SSID 與密碼
+
+# 3. 上傳程式；wifi_secrets.h 不會被 Git 追蹤
+```
+
+#### Wi-Fi 顯示圖示
+
+OLED 右上角會顯示簡單的 Wi-Fi 圖示：
+
+- **Wi-Fi 圖示亮起**：表示成功連線
+- **無 Wi-Fi 圖示**：表示未連線或仍在嘗試連接
+
+圖示由 `drawWiFiIcon()` 函式繪製，可自訂樣式與位置。
+
 ### 4. 無源蜂鳴器
 
 無源蜂鳴器是一種發聲元件，可用於提示音、按鍵音、警示音與簡單旋律。本專題在偵測到有效心跳時會短鳴一次，讓學生能聽到心跳偵測事件。
@@ -498,9 +586,13 @@ NodeMCU-32S
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
 #include "MAX30105.h"
 #include "heartRate.h"
+#include "../include/wifi_secrets.h"
 ```
+
+注意：`WiFi.h` 與 `WiFi` 函式庫是 ESP32 開發環境內建，無需另外安裝。`wifi_secrets.h` 需使用者自行建立或從 `wifi_secrets.example.h` 複製並編輯。
 
 ## 九、上傳與測試
 
@@ -643,7 +735,29 @@ if (beatAvg >= BPM_PURPLE_THRESHOLD) {
 
 一般狀態下，WS2812 會依 BPM 平均值顯示紫、黃、綠三種狀態。警報條件由 `SPO2_ALARM_THRESHOLD` 與 `ALARM_BPM_THRESHOLD` 控制，當 `SpO2` 低於門檻且 BPM 達門檻時，紅紫交替閃爍會優先於一般 BPM 燈號。<span style="color:red">目前 `SPO2_ALARM_THRESHOLD` 設為 `99.0` 是為了呈現警示效果，實際教學使用需依正確值調整後重新燒錄程式。</span>
 
-### 8. 蜂鳴器提示
+### 8. Wi-Fi 連接管理
+
+```cpp
+void beginWiFiConnectionManager();  // 在 setup() 中呼叫一次，啟動 Wi-Fi
+void handleWiFiConnection();        // 在 loop() 中每次都呼叫，維持連接狀態
+```
+
+Wi-Fi 連接採用非阻塞式設計：
+
+- `beginWiFiConnectionManager()`：初始化 Wi-Fi 模組（含 sleep/tx power 設定），開始連接第 1 組 SSID
+- `handleWiFiConnection()`：檢查連接狀態，自動切換 SSID 或重試
+
+關鍵邏輯：
+
+1. 開機後先延後 `WIFI_START_DELAY_MS`（預設 5 秒）再啟動 Wi-Fi
+2. 若第 1 組 SSID 在 6 秒內連接成功，保持連線
+3. 若 6 秒後仍未連接，自動嘗試第 2 組 SSID（8 秒超時）
+4. 若兩組都失敗，等待 10 秒後從第 1 組重新開始
+5. 若已連線但後來斷線，將自動重新嘗試
+
+此設計讓主程式可以繼續讀取感測器與更新畫面，不會被 Wi-Fi 連接卡住。
+
+### 9. 蜂鳴器提示
 
 ```cpp
 tone(Tonepin, 1000, 10);
@@ -677,6 +791,11 @@ tone(Tonepin, 1000, 10);
 | ESP32 一直重開 | 短路或供電不足 | 檢查麵包板電源軌與 USB 線 |
 | I2C 裝置找不到 | SDA/SCL 接錯或線太長 | 檢查 GPIO21/GPIO22，縮短線材 |
 | 編譯出現 `I2C_BUFFER_LENGTH` warning | 函式庫重複定義 buffer | 若最後能編譯上傳，通常可先忽略 |
+| Wi-Fi 無法連接 | wifi_secrets.h 遺失或 SSID/密碼錯誤 | 確認 wifi_secrets.h 存在且內容正確，檢查網路是否開放 |
+| Wi-Fi 圖示不亮 | 未連接到任何網路 | 檢查 Serial 輸出是否顯示連接錯誤，確認 2.4GHz 網路頻段 |
+| 編譯找不到 wifi_secrets.h | 檔案未建立或路徑錯誤 | 從 `wifi_secrets.example.h` 複製並重新命名為 `wifi_secrets.h`，與 `main.cpp` 或 `main.ino` 同目錄 |
+| 出現 `Brownout detector was triggered` | 供電不足、Wi-Fi 啟動瞬間電流過大 | 使用較短且品質較好的 USB 線、確認 5V 供電穩定，並保留 `WIFI_START_DELAY_MS` 延後啟動 |
+| 序列埠顯示亂碼 | 監看速率與 `Serial.begin()` 不一致 | 將序列埠監看速率設為 `115200`（PlatformIO `monitor_speed = 115200`） |
 
 上傳時如果一直停在 `Connecting...`，可按住 ESP32 的 `BOOT` 鍵，等開始上傳後再放開。也可把上傳速度改成：
 

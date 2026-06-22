@@ -7,9 +7,8 @@
 #include "heartRate.h"
 #include "wifi_secrets.h"
 
-#ifndef IRAM_ATTR
-#define IRAM_ATTR
-#endif
+// ==================== 函式前向聲明 ====================
+void drawMainScreen(bool fingerOn);
 
 // ==================== 可調整參數 ====================
 // OLED 顯示器尺寸與 I2C 位址設定；若 OLED 位址不同，可將 OLED_ADDR 改為 0x3D。
@@ -62,6 +61,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS 8000
 #define WIFI_PRIMARY_TIMEOUT_MS 6000
 #define WIFI_RETRY_INTERVAL_MS 10000
+#define WIFI_START_DELAY_MS 5000
 
 // ==================== 物件與狀態變數 ====================
 
@@ -111,6 +111,15 @@ int currentWiFiIndex = -1;
 unsigned long wifiAttemptStart = 0;
 unsigned long lastWiFiRetry = 0;
 bool wifiAttemptInProgress = false;
+bool wifiManagerStarted = false;
+unsigned long wifiStartAt = 0;
+
+// MAX30105 初始化重試控制
+bool sensorInitFailed = false;
+unsigned long lastSensorRetry = 0;
+const unsigned long SENSOR_RETRY_INTERVAL = 3000; // 3 秒重試一次
+int sensorRetryCount = 0;
+const int MAX_SENSOR_RETRIES = 10; // 最多重試 10 次
 
 unsigned long getWiFiTimeoutMs(int apIndex) {
   return (apIndex == 0) ? WIFI_PRIMARY_TIMEOUT_MS : WIFI_CONNECT_TIMEOUT_MS;
@@ -129,7 +138,14 @@ void startWiFiAttempt(int apIndex) {
 }
 
 void beginWiFiConnectionManager() {
+  if (wifiManagerStarted) return;
+
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(true);
+#ifdef WIFI_POWER_8_5dBm
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+#endif
+  wifiManagerStarted = true;
 
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
@@ -143,6 +159,8 @@ void beginWiFiConnectionManager() {
 }
 
 void handleWiFiConnection() {
+  if (!wifiManagerStarted) return;
+
   wl_status_t status = WiFi.status();
   unsigned long now = millis();
 
@@ -294,6 +312,47 @@ void drawBootScreen(const char *line1, const char *line2) {
   display.display();
 }
 
+// 初始化 MAX30105 感測器
+bool initializeSensor() {
+  if (sensorReady) return true;
+  
+  Serial.print("[SENSOR] Attempting initialization (attempt #");
+  Serial.print(sensorRetryCount + 1);
+  Serial.println(")");
+  
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    sensorRetryCount++;
+    Serial.println("[SENSOR] Initialization failed - device not found or I2C error.");
+    sensorInitFailed = true;
+    lastSensorRetry = millis();
+    
+    if (sensorRetryCount <= MAX_SENSOR_RETRIES) {
+      drawBootScreen("Sensor Init", "Retrying...");
+    } else {
+      drawBootScreen("SENSOR ERROR", "Check Wiring");
+    }
+    return false;
+  }
+  
+  Serial.println("[SENSOR] Successfully detected MAX30105.");
+  
+  // 設定感測器參數：亮度、平均、LED 模式、取樣率、脈波寬度、ADC 範圍
+  particleSensor.setup(0x7F, 4, 2, 800, 215, 16384);
+  particleSensor.enableDIETEMPRDY();
+  particleSensor.setPulseAmplitudeRed(0x24);
+  particleSensor.setPulseAmplitudeIR(0x24);
+  particleSensor.setPulseAmplitudeGreen(0);
+  
+  Serial.println("[SENSOR] Configuration complete.");
+  sensorReady = true;
+  sensorInitFailed = false;
+  sensorRetryCount = 0;
+  
+  delay(500);
+  drawMainScreen(false);
+  return true;
+}
+
 // 顯示主畫面內容，包含手指提示、SpO2 與 BPM
 void drawMainScreen(bool fingerOn) {
   if (!oledReady) return;
@@ -379,49 +438,70 @@ void drawMainScreen(bool fingerOn) {
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
+  Serial.println("\n[SYSTEM] MiniSpO2-OLED initializing...");
 
   statusPixel.begin();
   statusPixel.setBrightness(WS2812_BRIGHTNESS);
   showStatusPixel(0);
 
   // 初始化 OLED 顯示器
+  Serial.println("[OLED] Initializing display...");
   oledReady = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oledReady) {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     drawBootScreen("Hello", "Starting...");
+    Serial.println("[OLED] Display initialized successfully.");
   } else {
-    Serial.println("OLED not found. Check I2C address/wiring.");
+    Serial.println("[OLED] FATAL: Display not found. Check I2C address/wiring.");
   }
 
-  beginWiFiConnectionManager();
+  WiFi.mode(WIFI_OFF);
+  wifiStartAt = millis() + WIFI_START_DELAY_MS;
+  Serial.print("[WIFI] Delayed startup in ms: ");
+  Serial.println(WIFI_START_DELAY_MS);
 
-  // 初始化 MAX30105 感測器，使用 I2C 快速模式
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("MAX30105 was not found. Check wiring/power.");
-    drawBootScreen("SENSOR ERROR", "CHECK WIRING");
-    return;
+  // 嘗試初始化 MAX30105，失敗時進入重試模式
+  Serial.println("[SENSOR] Initializing sensor...");
+  if (!initializeSensor()) {
+    // 感測器初始化失敗，進入重試模式但不直接返回
+    // loop() 將會定期重試
+    Serial.println("[SYSTEM] Setup complete. Sensor initialization failed - will retry in loop.");
+  } else {
+    Serial.println("[SYSTEM] Setup complete. All systems ready.");
   }
-
-  sensorReady = true;
-
-  // 設定感測器參數：亮度、平均、LED 模式、取樣率、脈波寬度、ADC 範圍
-  particleSensor.setup(0x7F, 4, 2, 800, 215, 16384);
-  particleSensor.enableDIETEMPRDY();
-  particleSensor.setPulseAmplitudeRed(0x24);
-  particleSensor.setPulseAmplitudeIR(0x24);
-  particleSensor.setPulseAmplitudeGreen(0);
-
-  delay(800);
-  drawMainScreen(false);
 }
 
 // 主迴圈
 void loop() {
+  if (!wifiManagerStarted && millis() >= wifiStartAt) {
+    Serial.println("[WIFI] Starting WiFi manager now...");
+    beginWiFiConnectionManager();
+  }
+
   handleWiFiConnection();
 
+  // 如果感測器初始化失敗，定期重試
+  if (sensorInitFailed && !sensorReady) {
+    unsigned long now = millis();
+    if (now - lastSensorRetry >= SENSOR_RETRY_INTERVAL) {
+      if (sensorRetryCount < MAX_SENSOR_RETRIES) {
+        initializeSensor();
+      } else {
+        // 超過最大重試次數，顯示錯誤畫面但繼續運行
+        if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+          drawBootScreen("SENSOR ERROR", "Check Wiring");
+          lastDisplayUpdate = now;
+        }
+      }
+    }
+    delay(100);
+    return;
+  }
+
   if (!sensorReady) {
-    delay(1000);
+    delay(100);
     return;
   }
 
@@ -512,16 +592,14 @@ void loop() {
 
       particleSensor.nextSample();
     }
-  } else {
-    // 手指不在感測器上，狀態切換時已重置
   }
-
   updateStatusPixel(fingerOn);
   updateAlarmBuzzer(isAlarmActive(fingerOn));
 
   // 定時更新畫面
-  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+  unsigned long now = millis();
+  if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
     drawMainScreen(fingerOn);
-    lastDisplayUpdate = millis();
+    lastDisplayUpdate = now;
   }
 }
